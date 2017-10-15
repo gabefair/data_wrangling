@@ -11,22 +11,22 @@ from time import clock
 import atexit
 from time import time
 from datetime import timedelta
+from time import perf_counter
 
-chunksize = 45000 #reddit posts have a 15000 char limit except for self-post subreddit gets 40k, so we will just make it 45k right now to include metadata.
+chunksize = 50000 #.05mb loaded into RAM at a time #Ironically the smaller the chunksize the faster it goes b/c of the regular expression matching being O(n^2)
 current_comment_count = 0
 global_comment_count = 0
 file_count = 0
-comments_per_file = 20000
+comments_per_file = 500000
 json_pattern = re.compile(b'\{(?:[^{}])*\}')
 file_progress = 0
 chunk_remainder = 0
 output_file_contents = ''  # The new file will build in RAM before writing to disk. Limiting the number of disk bottlenecks
 file_size = 0
-bar = object()
+bar = progressbar.ProgressBar(maxval=100,widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
 
 def split_json(file_argument):
 	global output_file_contents
-	global chunk
 	global current_comment_count
 	global file_progress
 	global chunk_remainder
@@ -35,14 +35,15 @@ def split_json(file_argument):
 	global bar
 	global global_comment_count
 	global file_size
+	
 	file_size = os.path.getsize(sys.argv[1])
-	bar = progressbar.ProgressBar(maxval=100,widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
 
 	print("Reading file: " + file_argument + " Splitting every: " + str(comments_per_file) + " comments")
+	bar = progressbar.ProgressBar(redirect_stdout=True)
+	bar.start()
+	lap_time = perf_counter()
 	with open(file_argument, "rb") as file:
-		bar.start()
-		bar.update(1)
-		chunk = file.read(chunksize)
+		chunk = grab_new_chunk(file)
 		
 		while not last_chunk:
 			for match in json_pattern.finditer(chunk):
@@ -54,48 +55,58 @@ def split_json(file_argument):
 					if (current_comment_count < comments_per_file):
 						output_file_contents = output_file_contents + '\n'
 					chunk_remainder = match.end()
-					#print("current_comment_count: "+ str(current_comment_count) + " sys.getsizeof(str(match.group())): " + str(sys.getsizeof(str(match.group())))+ " file_progress: "+ str(file_progress)+'\n')
+					if ( current_comment_count % 500000 == 0):
+						print("Comments proccessed: "+ str(global_comment_count) + ' and the time it took: ' + str(timedelta(seconds=perf_counter() - lap_time)))
+						lap_time = perf_counter()
+						bar.update(int((file.tell()/file_size)*100))
 				else:
 					print("ERROR: no match found in: \n" + chunk)
 					exit()
 
 				if (current_comment_count >= comments_per_file):
-					write_file(file_argument, file_count, output_file_contents)
-					output_file_contents = ''
-
-			chunk = chunk[chunk_remainder:] + grab_new_chunk(file,chunksize)
-			if not chunk or chunk == "":
+					write_file(file_argument, 0)
+			#print("\n\t Old chunk: \n")
+			#print(chunk)
+			new_chunk = grab_new_chunk(file)
+			if not new_chunk or new_chunk == "":
 				last_chunk = True
 				break
-		write_file(file_argument, file_count, output_file_contents)
+			chunk = chunk[chunk_remainder:] + new_chunk #append new chunk to any leftovers
+			#print("\n\t New chunk: \n")
+			#print(chunk)
+			
+		write_file(file_argument, 0)
 		bar.finish()
-		print("Bytes successfully read:  "+ str(int(file_progress)) + '/' + str(os.path.getsize(file_argument)) + ' ('+ str((file_progress//os.path.getsize(file_argument))*100) + '%)')
+		print("Bytes successfully read:  "+ str(int(file.tell())) + '/' + str(os.path.getsize(file_argument)) + ' ('+ str((file.tell()//os.path.getsize(file_argument))*100) + '%)')
 		print("Total files: ", file_count)
 		print("Total comments: ", global_comment_count)
 		return
 
 
-def write_file(file_name, file_num, output):
+def write_file(file_name, leave_open_flag):
 	global current_comment_count
-	global file_progress
 	global file_count
 	global global_comment_count
+	global output_file_contents
 	
-	f = open(file_name + '_%04d' % file_num, 'w')
-	f.write(output)
+	f = open(file_name + '_%04d' % file_count, 'a')
+	f.write(output_file_contents)
 	f.close()
-	file_count += 1
-	current_comment_count = 0
+	output_file_contents = ''
+	if(leave_open_flag == 0):
+		file_count += 1
+		current_comment_count = 0
 
 
-def grab_new_chunk(file,byte_size_of_chunk):
+def grab_new_chunk(file):
 	global file_progress
 	global bar
 	global file_size
-	
+	write_file(sys.argv[1],1)#save_current_progress
+	#print("file.tell is: ", file.tell())
 	file_progress = int((file.tell()/file_size)*100)
 	bar.update(file_progress)
-	#file.seek(byte_size_of_chunk,0)
+	#print("updated bar")
 	return file.read(chunksize)
 	
 	
